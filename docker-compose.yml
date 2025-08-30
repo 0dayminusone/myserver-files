@@ -1,0 +1,514 @@
+networks:
+  # Frontend network for reverse proxy and web services
+  frontend:
+    driver: bridge
+  # Backend network for databases and internal services
+  backend:
+    driver: bridge
+  # Monitoring network for uptime and system monitoring
+  monitoring:
+    driver: bridge
+  # VPN network for secure services
+  vpn:
+    driver: bridge
+
+services:
+  # ========================================
+  # REVERSE PROXY & SSL TERMINATION
+  # ========================================
+  # Traefik - Modern reverse proxy with automatic SSL
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.myresolver.acme.tlschallenge=true
+      - --certificatesresolvers.myresolver.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080" # Traefik dashboard
+    volumes:
+      - /docker-data/traefik/letsencrypt:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN_NAME}`)"
+
+  # ========================================
+  # WEB SERVERS & FILE SERVING
+  # ========================================
+  
+  # Nginx - Main web server
+  nginx:
+    image: lscr.io/linuxserver/nginx:latest
+    container_name: nginx
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - /docker-data/nginx/config:/config
+      - /docker-data/nginx/www:/var/www/html
+    ports:
+      - "8081:80"
+      - "8443:443"
+    restart: unless-stopped
+    networks:
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nginx.rule=Host(`web.${DOMAIN_NAME}`)"
+      - "traefik.http.services.nginx.loadbalancer.server.port=80"
+
+  # Apache - Secondary web server for specific applications
+  apache:
+    image: httpd:2.4
+    container_name: apache
+    volumes:
+      - /docker-data/apache/htdocs:/usr/local/apache2/htdocs
+      - /docker-data/apache/config:/usr/local/apache2/conf
+    ports:
+      - "8082:80"
+    restart: unless-stopped
+    networks:
+      - frontend
+
+  # File Browser - Web-based file manager
+  filebrowser:
+    image: filebrowser/filebrowser:latest
+    container_name: filebrowser
+    volumes:
+      - /docker-data/filebrowser/config:/config
+      - /docker-data/filebrowser/database.db:/database.db
+      - /docker-data:/srv # Access to all docker data
+    ports:
+      - "8083:80"
+    restart: unless-stopped
+    networks:
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.filebrowser.rule=Host(`files.${DOMAIN_NAME}`)"
+
+  # Pi-hole - Network-wide DNS sinkhole and DHCP server
+  pihole:
+    image: pihole/pihole:latest
+    container_name: pihole
+    environment:
+      - WEBPASSWORD=${PIHOLE_PASSWORD}
+      - TZ=${TIMEZONE}
+      - SERVERIP=${PIHOLE_SERVERIP}
+      - DNS1=1.1.1.1
+      - DNS2=1.0.0.1
+    volumes:
+      - /docker-data/pihole/etc:/etc/pihole
+      - /docker-data/pihole/dnsmasq:/etc/dnsmasq.d
+    ports:
+      - "53:53/tcp"
+      - "53:53/udp"
+      - "67:67/udp" # DHCP
+      - "8053:80" # Web interface
+    restart: unless-stopped
+    networks:
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.pihole.rule=Host(`dns.${DOMAIN_NAME}`)"
+      - "traefik.http.services.pihole.loadbalancer.server.port=80"
+
+  # ========================================
+  # VPN SERVER
+  # ========================================
+  
+  # WireGuard VPN Server
+  wireguard:
+    image: lscr.io/linuxserver/wireguard:latest
+    container_name: wireguard
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TIMEZONE}
+      - SERVERURL=${WIREGUARD_SERVERURL}
+      - SERVERPORT=51820
+      - PEERS=${WIREGUARD_PEERS}
+      - PEERDNS=auto
+      - INTERNAL_SUBNET=10.13.13.0
+    volumes:
+      - /docker-data/wireguard/config:/config
+      - /lib/modules:/lib/modules
+    ports:
+      - "51820:51820/udp"
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+    networks:
+      - vpn
+
+  # ========================================
+  # DATABASES - My Infrastructure
+  # ========================================
+  
+  # PostgreSQL - Primary database - My Infrastructure
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - /docker-data/postgres/data:/var/lib/postgresql/data
+      - /docker-data/postgres/backups:/backups
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # MySQL/MariaDB - Secondary database - My Infrastructure
+  mariadb:
+    image: lscr.io/linuxserver/mariadb:latest
+    container_name: mariadb
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TIMEZONE}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+    volumes:
+      - /docker-data/mariadb/config:/config
+    ports:
+      - "3306:3306"
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # Redis - In-memory database and cache - My Infrastructure
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - /docker-data/redis/data:/data
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # MongoDB - Document database - My Infrastructure
+  mongodb:
+    image: mongo:6
+    container_name: mongodb
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_ROOT_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD}
+    volumes:
+      - /docker-data/mongodb/data:/data/db
+      - /docker-data/mongodb/config:/data/configdb
+    ports:
+      - "27017:27017"
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # ========================================
+  # FILE SERVERS & STORAGE - My Infrastructure
+  # ========================================
+  
+  # Samba - Windows file sharing
+  samba:
+    image: dperson/samba
+    container_name: samba
+    environment:
+      - TZ=${TIMEZONE}
+      - USERID=${PUID}
+      - GROUPID=${PGID}
+    command: '-s "shared;/shared;yes;no;no;all;none" -u "${SAMBA_USER};${SAMBA_PASSWORD}" -p'
+    volumes:
+      - /docker-data/samba/shared:/shared
+      - /docker-data:/docker-data:ro
+    ports:
+      - "139:139"
+      - "445:445"
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # FTP Server
+  vsftpd:
+    image: fauria/vsftpd
+    container_name: vsftpd
+    environment:
+      - FTP_USER=${FTP_USER}
+      - FTP_PASS=${FTP_PASSWORD}
+      - PASV_ADDRESS=${FTP_PASV_ADDRESS}
+    volumes:
+      - /docker-data/vsftpd/data:/home/vsftpd
+    ports:
+      - "20:20"
+      - "21:21"
+      - "21100-21110:21100-21110"
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # MinIO - S3-compatible object storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - /docker-data/minio/data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    restart: unless-stopped
+    networks:
+      - backend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.minio.rule=Host(`storage.${DOMAIN_NAME}`)"
+      - "traefik.http.services.minio.loadbalancer.server.port=9001"
+
+  # ========================================
+  # BACKUP SOLUTIONS
+  # ========================================
+  
+  # Duplicati - Backup solution
+  duplicati:
+    image: lscr.io/linuxserver/duplicati:latest
+    container_name: duplicati
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - /docker-data/duplicati/config:/config
+      - /docker-data/duplicati/backups:/backups
+      - /docker-data:/source:ro # Backup all docker data
+    ports:
+      - "8200:8200"
+    restart: unless-stopped
+    networks:
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.duplicati.rule=Host(`backup.${DOMAIN_NAME}`)"
+
+  # Restic - Modern backup program
+  restic:
+    image: restic/restic:latest
+    container_name: restic
+    environment:
+      - RESTIC_REPOSITORY=${RESTIC_REPOSITORY}
+      - RESTIC_PASSWORD=${RESTIC_PASSWORD}
+    volumes:
+      - /docker-data:/data:ro
+      - /docker-data/restic/cache:/cache
+    command: ['sh', '-c', 'while true; do sleep 86400; restic backup /data; done']
+    restart: unless-stopped
+    networks:
+      - backend
+
+  # ========================================
+  # MONITORING & UPTIME
+  # ========================================
+  
+  # Uptime Kuma - Uptime monitoring
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: uptime-kuma
+    volumes:
+      - /docker-data/uptime-kuma/data:/app/data
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+    networks:
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.uptime.rule=Host(`uptime.${DOMAIN_NAME}`)"
+      - "traefik.http.services.uptime.loadbalancer.server.port=3001"
+
+  # Grafana - Metrics dashboard
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+    volumes:
+      - /docker-data/grafana/data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    networks:
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`metrics.${DOMAIN_NAME}`)"
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+    volumes:
+      - /docker-data/prometheus/config:/etc/prometheus
+      - /docker-data/prometheus/data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # Node Exporter - System metrics
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    command:
+      - '--path.rootfs=/host'
+    volumes:
+      - '/:/host:ro,rslave'
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+    networks:
+      - monitoring
+
+  # ========================================
+  # AUTOMATIC UPDATES
+  # ========================================
+  
+  # Watchtower - Automatic container updates
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=3600 # Check every hour
+      - WATCHTOWER_NOTIFICATIONS_LEVEL=info
+      - WATCHTOWER_NOTIFICATION_EMAIL_FROM=${WATCHTOWER_EMAIL_FROM}
+      - WATCHTOWER_NOTIFICATION_EMAIL_TO=${WATCHTOWER_EMAIL_TO}
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER=${WATCHTOWER_EMAIL_SERVER}
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_USER=${WATCHTOWER_EMAIL_USER}
+      - WATCHTOWER_NOTIFICATION_EMAIL_SERVER_PASSWORD=${WATCHTOWER_EMAIL_PASSWORD}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /docker-data/watchtower/config:/config
+    restart: unless-stopped
+    networks:
+      - monitoring
+    labels:
+      # Exclude Watchtower from updating itself to prevent issues
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  # ========================================
+  # Misc
+  # ========================================
+  
+  # Portainer - Docker management UI
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    command: -H unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /docker-data/portainer/data:/data
+    ports:
+      - "9443:9443"
+    restart: unless-stopped
+    networks:
+      - monitoring
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN_NAME}`)"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+
+  # Heimdall - Application dashboard
+  heimdall:
+    image: lscr.io/linuxserver/heimdall:latest
+    container_name: heimdall
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TIMEZONE}
+    volumes:
+      - /docker-data/heimdall/config:/config
+    ports:
+      - "8085:80"
+      - "8444:443"
+    restart: unless-stopped
+    networks:
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.heimdall.rule=Host(`dashboard.${DOMAIN_NAME}`)"
+
+  # Adminer - Database management interface
+  adminer:
+    image: adminer:latest
+    container_name: adminer
+    ports:
+      - "8086:8080"
+    restart: unless-stopped
+    networks:
+      - backend
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.adminer.rule=Host(`db-admin.${DOMAIN_NAME}`)"
+
+  # phpMyAdmin - MySQL database management
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: phpmyadmin
+    environment:
+      - PMA_HOST=mariadb
+      - PMA_PORT=3306
+      - PMA_USER=${MYSQL_USER}
+      - PMA_PASSWORD=${MYSQL_PASSWORD}
+    ports:
+      - "8087:80"
+    restart: unless-stopped
+    depends_on:
+      - mariadb
+    networks:
+      - backend
+      - frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.phpmyadmin.rule=Host(`mysql-admin.${DOMAIN_NAME}`)"
+
+# ========================================
+# VOLUME DEFINITIONS
+# ========================================
+volumes:
+  # Define named volumes if needed for specific services
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
