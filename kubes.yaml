@@ -1,0 +1,302 @@
+kind: Namespace
+metadata:
+  name: my-infrastructure
+
+---
+# ========================================
+# POSTGRESQL DATABASE - My Infrastructure
+# ========================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: my-infrastructure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: "${POSTGRES_DB}"
+        - name: POSTGRES_USER
+          value: "${POSTGRES_USER}"
+        - name: POSTGRES_PASSWORD
+          value: "${POSTGRES_PASSWORD}"
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: postgres-data
+        hostPath:
+          path: /docker-data/postgres/data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: my-infrastructure
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+
+---
+# ========================================
+# REDIS CACHE - My Infrastructure
+# ========================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: my-infrastructure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        command:
+        - redis-server
+        - --requirepass
+        - "${REDIS_PASSWORD}"
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+      volumes:
+      - name: redis-data
+        hostPath:
+          path: /docker-data/redis/data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: my-infrastructure
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+
+---
+# ========================================
+# PI-HOLE DNS
+# ========================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pihole
+  namespace: my-infrastructure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pihole
+  template:
+    metadata:
+      labels:
+        app: pihole
+    spec:
+      containers:
+      - name: pihole
+        image: pihole/pihole:latest
+        ports:
+        - containerPort: 53
+        - containerPort: 80
+        env:
+        - name: WEBPASSWORD
+          value: "${PIHOLE_PASSWORD}"
+        - name: TZ
+          value: "${TIMEZONE}"
+        - name: DNS1
+          value: "1.1.1.1"
+        - name: DNS2
+          value: "1.0.0.1"
+        volumeMounts:
+        - name: pihole-etc
+          mountPath: /etc/pihole
+        - name: pihole-dnsmasq
+          mountPath: /etc/dnsmasq.d
+      volumes:
+      - name: pihole-etc
+        hostPath:
+          path: /docker-data/pihole/etc
+      - name: pihole-dnsmasq
+        hostPath:
+          path: /docker-data/pihole/dnsmasq
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pihole
+  namespace: my-infrastructure
+spec:
+  selector:
+    app: pihole
+  ports:
+  - port: 53
+    targetPort: 53
+    name: dns
+  - port: 80
+    targetPort: 80
+    name: web
+  type: LoadBalancer
+
+---
+# ========================================
+# NGINX WEB SERVER
+# ========================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: my-infrastructure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: nginx-html
+          mountPath: /usr/share/nginx/html
+      volumes:
+      - name: nginx-html
+        hostPath:
+          path: /docker-data/nginx/www
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: my-infrastructure
+spec:
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+    targetPort: 80
+  type: LoadBalancer
+
+---
+# ========================================
+# UPTIME KUMA MONITORING
+# ========================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: uptime-kuma
+  namespace: my-infrastructure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: uptime-kuma
+  template:
+    metadata:
+      labels:
+        app: uptime-kuma
+    spec:
+      containers:
+      - name: uptime-kuma
+        image: louislam/uptime-kuma:1
+        ports:
+        - containerPort: 3001
+        volumeMounts:
+        - name: uptime-kuma-data
+          mountPath: /app/data
+      volumes:
+      - name: uptime-kuma-data
+        hostPath:
+          path: /docker-data/uptime-kuma/data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: uptime-kuma
+  namespace: my-infrastructure
+spec:
+  selector:
+    app: uptime-kuma
+  ports:
+  - port: 3001
+    targetPort: 3001
+  type: LoadBalancer
+
+---
+# ========================================
+# WATCHTOWER AUTO-UPDATER
+# ========================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: watchtower
+  namespace: my-infrastructure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: watchtower
+  template:
+    metadata:
+      labels:
+        app: watchtower
+    spec:
+      containers:
+      - name: watchtower
+        image: containrrr/watchtower:latest
+        env:
+        - name: WATCHTOWER_CLEANUP
+          value: "true"
+        - name: WATCHTOWER_POLL_INTERVAL
+          value: "3600"
+        volumeMounts:
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+      volumes:
+      - name: docker-sock
+        hostPath:
+          path: /var/run/docker.sock
